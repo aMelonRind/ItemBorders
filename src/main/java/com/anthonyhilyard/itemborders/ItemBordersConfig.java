@@ -1,8 +1,6 @@
 package com.anthonyhilyard.itemborders;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.function.Supplier;
 
 import com.anthonyhilyard.iceberg.util.Selectors;
@@ -50,7 +48,8 @@ public class ItemBordersConfig
 
 	private record ItemKey(Item item, CompoundTag tag) {}
 
-	private Map<ItemKey, Pair<Supplier<Integer>, Supplier<Integer>>> cachedCustomBorders = new HashMap<ItemKey, Pair<Supplier<Integer>, Supplier<Integer>>>();
+	private final Map<ItemKey, CacheEntry> cachedCustomBorders = new HashMap<>();
+	private int cacheCleanCounter = 0;
 	private boolean emptyCache = true;
 
 	public ItemBordersConfig(ForgeConfigSpec.Builder build)
@@ -174,10 +173,31 @@ public class ItemBordersConfig
 		{
 			emptyCache = false;
 			cachedCustomBorders.clear();
+			cacheCleanCounter = 0;
+		} else {
+			CacheEntry entry = cachedCustomBorders.get(itemKey);
+			if (entry != null) {
+				return entry.get();
+			}
 		}
-		if (cachedCustomBorders.containsKey(itemKey))
-		{
-			return cachedCustomBorders.get(itemKey);
+
+		// prevent memory leak from having too many cache.
+		// for example, an activated Terra Shatterer from botania creates a cache entry for each tick,
+		// which takes 100kb of memory for each entry.
+		if (cacheCleanCounter++ > 128) {
+			cacheCleanCounter = 0;
+
+			ArrayList<ItemKey> toRemove = new ArrayList<>(cachedCustomBorders.size());
+			long threshold = System.currentTimeMillis() - 5 * 60000;
+			for (Map.Entry<ItemKey, CacheEntry> entry : cachedCustomBorders.entrySet()) {
+				if (entry.getValue().shouldRemove(threshold)) {
+					toRemove.add(entry.getKey());
+				}
+			}
+
+			for (ItemKey key : toRemove) {
+				cachedCustomBorders.remove(key);
+			}
 		}
 
 		// Check the manual border map first.
@@ -196,7 +216,7 @@ public class ItemBordersConfig
 			{
 				if (Selectors.itemMatches(item, (String)value))
 				{
-					cachedCustomBorders.put(itemKey, colors);
+					cachedCustomBorders.put(itemKey, new CacheEntry(colors));
 					return colors;
 				}
 			}
@@ -209,7 +229,7 @@ public class ItemBordersConfig
 					{
 						if (Selectors.itemMatches(item, (String)stringVal))
 						{
-							cachedCustomBorders.put(itemKey, colors);
+							cachedCustomBorders.put(itemKey, new CacheEntry(colors));
 							return colors;
 						}
 					}
@@ -251,7 +271,7 @@ public class ItemBordersConfig
 					final TextColor finalTopColor = topColor;
 					final TextColor finalBottomColor = bottomColor;
 					colors = new Pair<Supplier<Integer>,Supplier<Integer>>(() -> finalTopColor.getValue(), () -> finalBottomColor.getValue());
-					cachedCustomBorders.put(itemKey, colors);
+					cachedCustomBorders.put(itemKey, new CacheEntry(colors));
 					return colors;
 				}
 			}
@@ -278,7 +298,25 @@ public class ItemBordersConfig
 			}
 		}
 
-		cachedCustomBorders.put(itemKey, colors);
+		cachedCustomBorders.put(itemKey, new CacheEntry(colors));
 		return colors;
+	}
+
+	private static class CacheEntry {
+		private long lastAccess = System.currentTimeMillis();
+		private final Pair<Supplier<Integer>, Supplier<Integer>> colors;
+
+		public CacheEntry(Pair<Supplier<Integer>, Supplier<Integer>> colors) {
+			this.colors = colors;
+		}
+
+		public Pair<Supplier<Integer>, Supplier<Integer>> get() {
+			lastAccess = System.currentTimeMillis();
+			return colors;
+		}
+
+		public boolean shouldRemove(long threshold) {
+			return this.lastAccess < threshold;
+		}
 	}
 }
